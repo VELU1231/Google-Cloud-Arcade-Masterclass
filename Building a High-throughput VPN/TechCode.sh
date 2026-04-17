@@ -1,0 +1,153 @@
+#!/bin/bash
+
+# Define color variables
+BLACK_TEXT=$'\033[0;90m'
+RED_TEXT=$'\033[0;91m'
+GREEN_TEXT=$'\033[0;92m'
+YELLOW_TEXT=$'\033[0;93m'
+BLUE_TEXT=$'\033[0;94m'
+MAGENTA_TEXT=$'\033[0;95m'
+CYAN_TEXT=$'\033[0;96m'
+WHITE_TEXT=$'\033[0;97m'
+
+NO_COLOR=$'\033[0m'
+RESET_FORMAT=$'\033[0m'
+
+# Define text formatting variables
+BOLD_TEXT=$'\033[1m'
+UNDERLINE_TEXT=$'\033[4m'
+
+clear
+
+# Welcome message
+echo "${CYAN_TEXT}${BOLD_TEXT}==================================================================${RESET_FORMAT}"
+echo "${CYAN_TEXT}${BOLD_TEXT}      SUBSCRIBE TECH & CODE- INITIATING EXECUTION...  ${RESET_FORMAT}"
+echo "${CYAN_TEXT}${BOLD_TEXT}==================================================================${RESET_FORMAT}"
+echo
+
+# DO SUBSCRIBE TO DR ABHISHEK
+read -p "${YELLOW_TEXT}${BOLD_TEXT}Enter REGION_1 (example: us-east1): ${RESET_FORMAT}" REGION_1
+read -p "${YELLOW_TEXT}${BOLD_TEXT}Enter REGION_2 (example: us-central1): ${RESET_FORMAT}" REGION
+
+# Export regions
+export REGION_1
+export REGION
+
+# Automatically pick a zone from each region
+echo "${YELLOW_TEXT}${BOLD_TEXT}Automatically selecting zones...${RESET_FORMAT}"
+export ZONE_1=$(gcloud compute zones list \
+  --filter="region:($REGION_1)" \
+  --format="value(name)" | head -n 1)
+
+export ZONE_2=$(gcloud compute zones list \
+  --filter="region:($REGION)" \
+  --format="value(name)" | head -n 1)
+
+# Safety check
+if [[ -z "$ZONE_1" || -z "$ZONE_2" ]]; then
+  echo "${RED_TEXT}❌ Invalid region entered. Please check region names.${RESET_FORMAT}"
+  exit 1
+fi
+
+echo "${GREEN_TEXT}Using:${RESET_FORMAT}"
+echo "${GREEN_TEXT}  REGION_1 = $REGION_1 → ZONE_1 = $ZONE_1${RESET_FORMAT}"
+echo "${GREEN_TEXT}  REGION_2 = $REGION → ZONE_2 = $ZONE_2${RESET_FORMAT}"
+echo
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating cloud network...${RESET_FORMAT}"
+gcloud compute networks create cloud --subnet-mode custom
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Configuring cloud firewall rules...${RESET_FORMAT}"
+gcloud compute firewall-rules create cloud-fw --network cloud --allow tcp:22,tcp:5001,udp:5001,icmp
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating cloud subnet...${RESET_FORMAT}"
+gcloud compute networks subnets create cloud-east --network cloud \
+    --range 10.0.1.0/24 --region $REGION_1
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating on-prem network...${RESET_FORMAT}"
+gcloud compute networks create on-prem --subnet-mode custom
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Configuring on-prem firewall rules...${RESET_FORMAT}"
+gcloud compute firewall-rules create on-prem-fw --network on-prem --allow tcp:22,tcp:5001,udp:5001,icmp
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating on-prem subnet...${RESET_FORMAT}"
+gcloud compute networks subnets create on-prem-central \
+    --network on-prem --range 192.168.1.0/24 --region $REGION
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating VPN gateways...${RESET_FORMAT}"
+gcloud compute target-vpn-gateways create on-prem-gw1 --network on-prem --region $REGION
+gcloud compute target-vpn-gateways create cloud-gw1 --network cloud --region $REGION_1
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Allocating IP addresses...${RESET_FORMAT}"
+gcloud compute addresses create cloud-gw1 --region $REGION_1
+gcloud compute addresses create on-prem-gw1 --region $REGION
+
+cloud_gw1_ip=$(gcloud compute addresses describe cloud-gw1 \
+    --region $REGION_1 --format='value(address)')
+
+on_prem_gw_ip=$(gcloud compute addresses describe on-prem-gw1 \
+    --region $REGION --format='value(address)')
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating forwarding rules...${RESET_FORMAT}"
+gcloud compute forwarding-rules create cloud-1-fr-esp --ip-protocol ESP \
+    --address $cloud_gw1_ip --target-vpn-gateway cloud-gw1 --region $REGION_1
+
+gcloud compute forwarding-rules create cloud-1-fr-udp500 --ip-protocol UDP \
+    --ports 500 --address $cloud_gw1_ip --target-vpn-gateway cloud-gw1 --region $REGION_1
+
+gcloud compute forwarding-rules create cloud-fr-1-udp4500 --ip-protocol UDP \
+    --ports 4500 --address $cloud_gw1_ip --target-vpn-gateway cloud-gw1 --region $REGION_1
+
+gcloud compute forwarding-rules create on-prem-fr-esp --ip-protocol ESP \
+    --address $on_prem_gw_ip --target-vpn-gateway on-prem-gw1 --region $REGION
+
+gcloud compute forwarding-rules create on-prem-fr-udp500 --ip-protocol UDP --ports 500 \
+    --address $on_prem_gw_ip --target-vpn-gateway on-prem-gw1 --region $REGION
+
+gcloud compute forwarding-rules create on-prem-fr-udp4500 --ip-protocol UDP --ports 4500 \
+    --address $on_prem_gw_ip --target-vpn-gateway on-prem-gw1 --region $REGION
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating VPN tunnels...${RESET_FORMAT}"
+gcloud compute vpn-tunnels create on-prem-tunnel1 --peer-address $cloud_gw1_ip \
+    --target-vpn-gateway on-prem-gw1 --ike-version 2 --local-traffic-selector 0.0.0.0/0 \
+    --remote-traffic-selector 0.0.0.0/0 --shared-secret=[MY_SECRET] --region $REGION
+
+gcloud compute vpn-tunnels create cloud-tunnel1 --peer-address $on_prem_gw_ip \
+    --target-vpn-gateway cloud-gw1 --ike-version 2 --local-traffic-selector 0.0.0.0/0 \
+    --remote-traffic-selector 0.0.0.0/0 --shared-secret=[MY_SECRET] --region $REGION_1
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating network routes...${RESET_FORMAT}"
+gcloud compute routes create on-prem-route1 --destination-range 10.0.1.0/24 \
+    --network on-prem --next-hop-vpn-tunnel on-prem-tunnel1 \
+    --next-hop-vpn-tunnel-region $REGION
+
+gcloud compute routes create cloud-route1 --destination-range 192.168.1.0/24 \
+    --network cloud --next-hop-vpn-tunnel cloud-tunnel1 --next-hop-vpn-tunnel-region $REGION_1
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Creating load test instances...${RESET_FORMAT}"
+gcloud compute instances create "cloud-loadtest" --zone $ZONE_1 \
+    --machine-type "e2-standard-4" --subnet "cloud-east" \
+    --image-family "debian-11" --image-project "debian-cloud" --boot-disk-size "10" \
+    --boot-disk-type "pd-standard" --boot-disk-device-name "cloud-loadtest"
+
+gcloud compute instances create "on-prem-loadtest" --zone $ZONE_2 \
+    --machine-type "e2-standard-4" --subnet "on-prem-central" \
+    --image-family "debian-11" --image-project "debian-cloud" --boot-disk-size "10" \
+    --boot-disk-type "pd-standard" --boot-disk-device-name "on-prem-loadtest"
+
+echo "${YELLOW_TEXT}${BOLD_TEXT}Running network performance test...${RESET_FORMAT}"
+gcloud compute ssh --zone "$ZONE_2" "on-prem-loadtest" --project "$DEVSHELL_PROJECT_ID" --quiet --command "sudo apt-get install -y iperf && iperf -s -i 5" &
+
+sleep 10
+
+gcloud compute ssh --zone "$ZONE_1" "cloud-loadtest" --project "$DEVSHELL_PROJECT_ID" --quiet --command "sudo apt-get install -y iperf && iperf -c 192.168.1.2 -P 20 -x C"
+
+# Final message
+echo
+echo "${CYAN_TEXT}${BOLD_TEXT}=======================================================${RESET_FORMAT_FORMAT}"
+echo "${CYAN_TEXT}${BOLD_TEXT}              LAB COMPLETED SUCCESSFULLY!              ${RESET_FORMAT_FORMAT}"
+echo "${CYAN_TEXT}${BOLD_TEXT}=======================================================${RESET_FORMAT_FORMAT}"
+echo
+echo "${RED_TEXT}${BOLD_TEXT}${UNDERLINE_TEXT}https://www.youtube.com/@DrVelu${RESET_FORMAT_FORMAT}"
+echo "${GREEN_TEXT}${BOLD_TEXT}Don't forget to Like, Share and Subscribe for more Videos${RESET_FORMAT_FORMAT}"
+echo
